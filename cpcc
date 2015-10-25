@@ -2,11 +2,11 @@
 
 # This file is part of Copernicus
 # http://www.copernicus-computing.org/
-# 
+#
 # Copyright (C) 2011, Sander Pronk, Iman Pouya, Erik Lindahl, and others.
 #
 # This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License version 2 as published 
+# it under the terms of the GNU General Public License version 2 as published
 # by the Free Software Foundation
 #
 # This program is distributed in the hope that it will be useful,
@@ -20,13 +20,13 @@
 
 
 
-# This is the main executable, from which all actions are launched. 
+# This is the main executable, from which all actions are launched.
 
 import sys
 import copy
+import logging
 import subprocess
 from getpass import getpass
-import textwrap
 
 import cpc.util
 from cpc.util import cmd_line_utils
@@ -38,6 +38,7 @@ from cpc.client import ClientMessage
 from cpc.network.com.client_response import ProcessedResponse
 from cpc.util.version import __version__
 
+log = logging.getLogger(__name__)
 
 def print_usage():
     print "Usage: cpcc [global-options] <command> [command-options]"
@@ -46,7 +47,7 @@ def print_usage():
     print "       cpcc add-server        [-n name] host [port]"
     print "       cpcc list-server"
     print "       cpcc use-server        [server]"
-    print 
+    print
     print "User related commands"
     print "       cpcc login             username"
     print "       cpcc add-user          username"
@@ -61,14 +62,14 @@ def print_usage():
     print "Working project setting and inspection command."
     print "       cpcc cd | set-default  projectname"
     print "       cpcc pwd | get-default projectname"
-    print 
+    print
     print "Project query commands."
     print "       cpcc list | ls         [instance_name]"
     print "       cpcc get               inst:in|out.ioname"
     print "       cpcc getf              [-f filename] inst:in|out.ioname "
     print "       cpcc info              function_name|module_name"
     print "       cpcc log               instance_name"
-    print 
+    print
     print "Project manipulation commands."
     print "       cpcc list-modules"
     print "       cpcc import            modulename"
@@ -92,7 +93,7 @@ def print_usage():
     print "       cpcc heartbeats | h "
     print "       cpcc command-failed    commandID"
     print ""
-    print "Server control commands"    
+    print "Server control commands"
     print "       cpcc stop-server"
     print "       cpcc trust             -all |server-id"
     print "       cpcc connect-server    host [client_secure_port]"
@@ -114,484 +115,651 @@ def print_usage():
     print "       cpcc [-c bundleFile]"
     sys.exit(1)
 
-# make a copy for later
-args=copy.copy(sys.argv)
-
-if len(args)<2:
-    cmd_line_utils.printLogo()
-    cmd_line_utils.printAuthors()
-    print_usage()
-
-# remove the 0th argument
-args.pop(0)
-bundleFile=None
-
-debug=False
-# first parse common options
-while len(args)>0:
-    if args[0][0]!='-':
-        break
-    elif args[0]=='-c':
-        option = args.pop(0)
-        if len(args) < 1:
-            sys.stdout.write("ERROR: no value specified for global option '%s'\n"%
-                             option)
-            print_usage()
-        bundleFile=args.pop(0)
-    elif args[0]=='-d':
-        args.pop(0)
-        debug=True
-
-    #can only handle the flag here and we do not want to completely rewrite the cmd line parsing logic at the moment
-    elif args[0]=='-h':
-        print_usage()
-        exit(0)
-    else:
-        sys.stdout.write("ERROR: no command, or erroneous global option '%s'\n"%
-                         args[0])
-        print_usage()
-
 def _printErrorAndExit(ErrorString):
-    sys.stderr.write('%s\n'%ErrorString)
+    sys.stderr.write('%s\n' % ErrorString)
     sys.exit(1)
 
-def getArg(arglist, argnr, name):
+def getArg(arglist, argnr, arg_name):
     """Get argument, or print out argument description."""
-    try: 
-        ret=arglist[argnr]
+    try:
+        ret = arglist[argnr]
     except IndexError:
-        raise ClientError("Missing argument: %s"%name)
+        raise ClientError("Missing argument: %s" % arg_name)
     return ret
 
-
-
 def getProjectArgs(args):
-    """Get argument list for project-style commands, where 
+    """Get argument list for project-style commands, where
        the project name is optional. Returns a tuple
-       of (projectName, options). Options is a list of 
+       of (projectName, options). Options is a list of
        arguments, without the project name."""
-    prevArg=None
-    projectName=None
-    retArgs=[]
+    prev_arg = None
+    project_name = None
+    ret_args = []
     for arg in args:
-        if prevArg == "-p":
-            projectName=arg
+        if prev_arg == "-p":
+            project_name = arg
         elif arg != "-p":
-            retArgs.append(arg)          
-        prevArg=arg
-    if prevArg == "-p":
+            ret_args.append(arg)
+        prev_arg = arg
+    if prev_arg == "-p":
         raise ClientError("Missing project name")
-    return (projectName, retArgs)
-        
-    
+    return (project_name, ret_args)
 
-# now parse command and execute it.
-#clnt=cpc.client(cf, args)
-
-if len(args)>0:
-    cmd=args[0]
-else:
-    _printErrorAndExit("ERROR: no command")
-
-try:
-    # handle local commands
-    if cmd == "add-server":
-        host=getArg(args, 1, "host")
-        project, pargs = getProjectArgs(args)
-        if host == '-n':
-            name = getArg(args, 2, "servername")
-            host = getArg(args, 3, "host")
-            if len(pargs) == 4:
-                port = Conf.getDefaultClientSecurePort()
-            else:
-                port = getArg(args, 4, "port")
+class CommandInterface(object):
+    """Interface for CPCC commands."""
+    # much of this is simple calls to client.view.cmdline, but this is cleaner
+    def __init__(self, bundle_file=None):
+        """Constructor."""
+        # Get the client
+        if bundle_file:
+            self.conf = cmd_line_utils.initiateConnectionBundle(bundle_file)
+            self.clnt = ClientMessage(self.conf, use_secure_server_port=True)
         else:
-            name = host
-            if len(pargs) == 2:
-                port = Conf.getDefaultClientSecurePort()
-            else:
-                port = getArg(args, 2, "port")
-        cmd_line_utils.addServer(name, host, port)
-        sys.exit(0)
+            self.conf = cmd_line_utils.getClientConf()
+            self.clnt = ClientMessage(self.conf, use_secure_server_port=False)
 
-    elif cmd == "use-server":
-        name = getArg(args, 1, "servername")
+    def addServer(self, host, server_name=None, port=None):
+        if not server_name:
+            server_name = host
+        if not port:
+            port = Conf.getDefaultClientSecurePort()
+        cmd_line_utils.addServer(server_name, host, port)
+
+    def useServer(self, name):
         cmd_line_utils.useServer(name)
-        sys.exit(0)
 
-    elif cmd == "list-server":
+    def listServer(self):
         CmdLine.listServer(cmd_line_utils.listServer())
-        sys.exit(0)
 
-    elif cmd == "help":
-        print_usage()
-        sys.exit(0)
+    def login(self, username, password):
+        return self.clnt.loginRequest(username, password)
 
-    # Get the client
-    if bundleFile is not None:
-        conf = cmd_line_utils.initiateConnectionBundle(bundleFile)
-        clnt=ClientMessage(conf=conf, use_secure_server_port=True)
-    else:
-        conf = cmd_line_utils.getClientConf()
-        clnt=ClientMessage(conf=conf, use_secure_server_port=False)
+    def addUser(self, username, password):
+        return self.clnt.addUser(username, password)
 
-    # handle remote commands
-    if cmd == "login":
-        if "-stdin" in args:
-            user = getArg(args, 2, "username")
-            password = raw_input()
+    def deleteUser(self, username):
+        return self.clnt.deleteUser(username)
+
+    def promoteUser(self, username):
+        return self.clnt.promoteUser(username)
+
+    def demoteUser(self, username):
+        return self.clnt.demoteUser(username)
+
+    def grantAccess(self, username):
+        self.clnt.grantAccess(username)
+
+    def listUsers(self):
+        return self.clnt.listRequest("users")
+
+    def version(self):
+        return self.clnt.serverInfo()
+
+    def queue(self):
+        return self.clnt.listRequest("queue")
+
+    def running(self):
+        return self.clnt.listRequest("running")
+
+    def heartbeats(self):
+        return self.clnt.listRequest("heartbeats")
+
+    def getFailed(self, command_id):
+        return self.clnt.commandFailedRequest(command_id, 0)
+
+    def startProject(self, project_name):
+        return self.clnt.projectStartRequest(project_name)
+
+    def deleteProject(self, project_name, delete_files=True):
+        return self.clnt.projectDeleteRequest(project_name, delete_files)
+
+    def listProjects(self):
+        return self.clnt.projectsRequest()
+
+    def setProject(self, project_name):
+        return self.clnt.projectSetDefaultRequest(project_name)
+
+    def getCurrentProject(self):
+        return self.clnt.projectGetDefaultRequest()
+
+    def listItem(self, project_name, item_name):
+        return self.clnt.projectListRequest(project_name, item_name)
+
+    def itemInfo(self, project_name, item_name):
+        return self.clnt.projectInfoRequest(project_name, item_name)
+
+    def getDebugInfo(self, project_name, item_name):
+        return self.clnt.projectDebugRequest(project_name, item_name)
+
+    def getGraph(self, project_name, item_name):
+        return self.clnt.projectGraphRequest(project_name, item_name)
+
+    def getLogData(self, project_name, item_name):
+        return self.clnt.projectLogRequest(project_name, item_name)
+
+    def activateNetwork(self, project_name, item_name):
+        return self.clnt.projectActivateRequest(project_name, item_name)
+
+    def deactivateNetwork(self, project_name, item_name):
+        return self.clnt.projectHoldRequest(project_name, item_name)
+
+    def rerunNetwork(self, project_name, item_name, stop_on_error):
+        """Rerun a network.
+        Args:
+          project_name:  project
+          item_name:  subnetwork to rerun (or "" for all subnetworks)
+          stop_on_error directs the server to simply clear an error state.
+        """
+        return self.clnt.projectRerunRequest(project_name, item_name,
+                                             stop_on_error)
+
+    def setItem(self, project_name, item_name, value):
+        return self.clnt.projectSetRequest(project, item, value, None)
+
+    def getItem(self, project_name, item_name, is_file):
+        return self.clnt.projectGetRequest(project_name, item_name, is_file)
+
+    def uploadProject(self, project_name, file_name):
+        """Uploads an XML-format project file to the server."""
+        return self.clnt.projectUploadRequest(project_name, file_name)
+
+    def setInput(self, project_name, item_name, file_name):
+        """Sets an input filename for an item."""
+        return self.clnt.projectSetRequest(project_name, item_name, None,
+                                           file_name)
+
+    def startTransaction(self, project_name):
+        """Starts a multi-command transaction for designated project."""
+        return self.clnt.projectTransactRequest(project_name)
+
+    def commitTransaction(self, project_name):
+        """Commits a multi-command transaction."""
+        return self.clnt.projectCommitRequest(project_name)
+
+    def rollback(self, project_name):
+        """Rolls back commands on a project."""
+        return self.clnt.projectRollbackRequest(project)
+
+    def listModules(self):
+        """Lists imported modules."""
+        return self.clnt.listRequest("modules")
+
+    def importModule(self, module_name, project_name=None):
+        """Imports a module, optionally designated for a project."""
+        return self.clnt.projectImportRequest(project, module_name)
+
+    def createInstance(self, project_name, function_name, instance_name):
+        """Create a new function instance."""
+        return self.clnt.projectAddInstanceRequest(project_name, function_name,
+                                                   instance_name)
+
+    def connectItems(self, project_name, src_item, dst_item):
+        """Connect source item's output to destination item's input."""
+        return self.clnt.projectConnectRequest(project_name, src_item, dst_item)
+
+    def trustServer(self, server_id=None):
+        """Instruct server to trust another server for connections."""
+        if server_id:
+            return self.clnt.grantNodeConnection(server_id)
         else:
-            user=getArg(args, 1, "username")
-            password = getpass()
-        #password=getArg(args, 2, "password")
-        ProcessedResponse(clnt.loginRequest(user, password)).pprint()
-    elif cmd == "add-user":
-        user=getArg(args, 1, "username")
-        password = getpass("Enter password:")
-        password_repeat = getpass("And again:")
-        if password != password_repeat:
-            _printErrorAndExit("Passwords don't match")
-        ProcessedResponse(clnt.addUser(user, password)).pprint()
-    elif cmd == "delete-user":
-        user=getArg(args, 1, "username")
-        ProcessedResponse(clnt.deleteUser(user)).pprint()
-    elif cmd == "promote-user":
-        user=getArg(args, 1, "username")
-        ProcessedResponse(clnt.promoteUser(user)).pprint()
-    elif cmd == "demote-user":
-        user=getArg(args, 1, "username")
-        ProcessedResponse(clnt.demoteUser(user)).pprint()
-    elif cmd == "grant-access":
-        user=getArg(args, 1, "username")
-        ProcessedResponse(clnt.grantAccess(user)).pprint()
-    elif cmd == "users":
-        renderMethod = CmdLine.listUsers
-        resp = clnt.listRequest("users")
-        ProcessedResponse(resp).pprint(renderMethod)
-    elif cmd == "version":
+            return self.clnt.grantAllNodeConnections()
+
+    def addServerNode(self, host_name, port_num):
+        """Adds a new server to server's node."""
+        return self.clnt.addNode(host_name, port_num)
+
+    def listServers(self):
+        """List connected servers."""
+        return self.clnt.listServers()
+
+    def revokeServer(self, server_id):
+        """Attempt to revoke a server.  Note problems!"""
+        log.warning("The revoke command has security issues.")
+        log.warning("A revoked server is not to be considered revoked "
+                    "in a secure manner.")
+        return self.clnt.revokeNode(server_id)
+
+    def setServerPriority(self, host, priority, port=13807):
+        """Set priority for a server."""
+        return self.clnt.changeNodePriority(host, priority, port)
+
+    def getNetworkTopology(self):
+        return self.clnt.networkTopology()
+
+    def getStatus(self, project_name=None):
+        return self.clnt.statusRequest(project_name)
+
+    def reloadConf(self):
+        """Reload configuration."""
+        return self.clnt.readConfRequest()
+
+    def stopServer(self):
+        """Tells server to shut down."""
+        return self.clnt.stopRequest()
+
+    def serverInfo(self):
+        """Gets server info."""
+        return self.clnt.serverInfo()
+
+    def pingServer(self, server_id=None):
+        """Pings designated server, defaults to the connected one."""
+        return self.clnt.pingServer(server_id)
+
+    def saveState(self):
+        """Tells the server to save its state to disk."""
+        return self.clnt.saveStateRequest()
+
+    def saveProject(self, project_name, outfile_name):
+        """Saves project data to a local file or returns json."""
+        response = self.clnt.projectSaveRequest(project_name)
+        if response.content_type == "text/json":
+            return response
+        else:
+            filecontents = response.getRawData()  # This is an mmap
+            # attempt to write file
+            try:
+                outfile = open(outfile_name, "wb")
+                outfile.write(filecontents.read(len(filecontents)))
+                outfile.close()
+            except IOError as e:
+                _printErrorAndExit("Could not save project to %s\nError %s"
+                                   % (outfile_name, e.strerror))
+                return "Saved project to %s" % outfile_name
+
+    def loadProject(self, project_name, infile_name):
+        """Loads a project from a file on the server."""
+        return self.clnt.projectRestoreRequest(project_name, infile_name)
+
+
+if __name__ == '__main__':
+    # Parse command-line arguments
+    # TODO:  switch over to OptParse
+
+    # make a copy for later
+    args = copy.copy(sys.argv)
+
+    if len(args) < 2:
         cmd_line_utils.printLogo()
         cmd_line_utils.printAuthors()
-        print("Client version:  %s"%__version__)
-        print("\nConnecting to server for version information:")
-        ProcessedResponse(clnt.serverInfo()).pprint(CmdLine.serverInfo)
-    elif cmd == "queue" or cmd=="q":
-        resp = clnt.listRequest("queue")
-        renderMethod = CmdLine.listQueue
-        ProcessedResponse(resp).pprint(renderMethod)
-    elif cmd == "running" or cmd == "r":
-        resp = clnt.listRequest("running")
-        renderMethod = CmdLine.listRunning
-        ProcessedResponse(resp).pprint(renderMethod)
-    elif cmd == "heartbeats" or cmd == "h":
-        resp = clnt.listRequest("heartbeats")
-        renderMethod = CmdLine.listHeartbeats
-        ProcessedResponse(resp).pprint(renderMethod)
-    elif cmd == "command-failed":
-        id=getArg(args, 1, "command ID")
-        #server=None
-        ProcessedResponse(clnt.commandFailedRequest(id,0)).pprint()
-    # dataflow application specific messages 
-    elif cmd == "start": 
-        name=getArg(args, 1, "project name")
-        ProcessedResponse(clnt.projectStartRequest(name)).pprint()
-    elif cmd == "remove" or cmd == "rm":
-        delDir=True
-        name=None
-        for arg in args:
-            if arg == cmd:
-                continue
-            if arg == "-k":
-                delDir=False
+        print_usage()
+
+    bundleFile = None
+    debug = False
+
+    # remove the 0th argument
+    args.pop(0)
+    # first parse common options
+    while len(args):
+        if args[0][0] != '-':
+            break
+        elif args[0] == '-h':
+            print_usage()
+            exit(0)
+        elif args[0] == '-c':
+            option = args.pop(0)
+            if len(args) < 1:
+                sys.stdout.write("ERROR: no value specified for global option"
+                                 "'%s'\n" % option)
+                print_usage()
+            bundleFile = args.pop(0)
+        elif args[0] == '-d':
+            args.pop(0)
+            debug = True
+        else:
+            sys.stdout.write("ERROR: no command, or erroneous global option "
+                             "'%s'\n" % args[0])
+        print_usage()
+
+    # now parse command and execute it.
+    if len(args) > 0:
+        cmd = args[0]
+    else:
+        _printErrorAndExit("ERROR: no command")
+
+    server_cmd = CommandInterface(bundleFile)
+    try:
+        # handle local commands
+        if cmd == "add-server":
+            host = getArg(args, 1, "host")
+            project, pargs = getProjectArgs(args)
+            if host == '-n':
+                name = getArg(args, 2, "servername")
+                host = getArg(args, 3, "host")
+                if len(pargs) == 4:
+                    port = Conf.getDefaultClientSecurePort()
+                else:
+                    port = getArg(args, 4, "port")
             else:
-                name=arg
-        if name is None:
-            _printErrorAndExit("Missing project name for project-delete")
-        ProcessedResponse(clnt.projectDeleteRequest(name, delDir)).pprint()
-    elif cmd == "projects" or cmd == "p":
-        renderMethod = CmdLine.listProjects
-        ProcessedResponse(clnt.projectsRequest()).pprint(renderMethod)
-    elif cmd == "set-default" or cmd == "cd":
-        project=getArg(args, 1, "project name")
-        ProcessedResponse(clnt.projectSetDefaultRequest(project)).pprint()
-    elif cmd == "get-default" or cmd == "pwd":
-        ProcessedResponse(clnt.projectGetDefaultRequest()).pprint()
-    elif cmd == "list" or cmd == "ls":
-        project, pargs = getProjectArgs(args)
-        if len(pargs) > 1:
-            item=getArg(pargs, 1, "project item to list")
-        else:
-            item=""
-        resp = clnt.projectListRequest(project, item)
-        renderMethod = CmdLine.listActiveItems
-        ProcessedResponse(resp).pprint(renderMethod)
-    elif cmd == "info":
-        project, pargs = getProjectArgs(args)
-        item=getArg(pargs, 1, "item to get info for")
-        resp = clnt.projectInfoRequest(project, item)
-        renderMethod = CmdLine.writeInfo
-        ProcessedResponse(resp).pprint(renderMethod)
-    elif cmd == "debug":
-        project, pargs = getProjectArgs(args)
-        item=getArg(pargs, 1, "item to get debug info for")
-        resp = clnt.projectDebugRequest(project, item)
-        ProcessedResponse(resp).pprint(None)
-    elif cmd == "graph": 
-        project, pargs = getProjectArgs(args)
-        if len(pargs) > 1:
-            item=getArg(pargs, 1, "project item to make graph of")
-        else:
-            item=""
-        resp = clnt.projectGraphRequest(project, item)
-        renderMethod = CmdLine.makeDotGraph
-        ProcessedResponse(resp).pprint(renderMethod)
-    elif cmd == "log":
-        project, pargs = getProjectArgs(args)
-        item=getArg(pargs, 1, "instance to get log for")
-        isFile = True
-        response = clnt.projectLogRequest(project, item)
-        if response.content_type=="text/json":
-            ProcessedResponse(response).pprint()
-        else:
-            filecontents = response.getRawData() #this is an mmap
-            sys.stdout.write(filecontents.read(len(filecontents)))
-    elif cmd == "activate":
-        project, pargs = getProjectArgs(args)
-        if len(pargs) > 1:
-            item=getArg(pargs, 1, "project item to list")
-        else:
-            item=""
-        ProcessedResponse(clnt.projectActivateRequest(project, item)).pprint()
-    elif cmd == "deactivate" or cmd == "hold":
-        project, pargs = getProjectArgs(args)
-        if len(pargs) > 1:
-            item=getArg(pargs, 1, "project item to list")
-        else:
-            item=""
-        ProcessedResponse(clnt.projectHoldRequest(project, item)).pprint()
-    elif cmd == "clear-error":
-        project, pargs = getProjectArgs(args)
-        if len(pargs) > 1:
-            item=getArg(pargs, 1, "project item to list")
-        else:
-            item=""
-        ProcessedResponse(clnt.projectRerunRequest(project, 
-                                                   item, 
-                                                   True)).pprint()
-    elif cmd == "force-rerun":
-        project, pargs = getProjectArgs(args)
-        item=getArg(pargs, 1, "project item to list")
-        ProcessedResponse(clnt.projectRerunRequest(project, 
-                                                   item, 
-                                                   False)).pprint()
-    elif cmd == "upload":
-        project, pargs = getProjectArgs(args)
-        filename=getArg(pargs, 1, "project XML file")
-        ProcessedResponse(clnt.projectUploadRequest(project, filename)).pprint()
-    elif cmd == "get":
-        project, pargs = getProjectArgs(args)
-        item=getArg(pargs, 1, "name of input/output item to get")
-        resp = clnt.projectGetRequest(project, item)
-        renderMethod = CmdLine.getItem
-        ProcessedResponse(resp).pprint(renderMethod)
-        #ProcessedResponse(clnt.projectGetRequest(project, item)).pprint()
-    elif cmd == "get-file" or cmd == "getf":
-        project, pargs = getProjectArgs(args)
-        if len(pargs)<2:
-            print("Missing argument: item name") 
-            sys.exit(1)
-        if pargs[1] == "-f":
-            if len(pargs)<3:
-                print("Missing argument: file name") 
-            if len(pargs)<4:
-                print("Missing argument: item name") 
-            output=pargs[2]
-            item=pargs[3]
-        else:
-            output=None
-            item=pargs[1]
-        #item=getArg(pargs, 1, "name of input/output item to get")
-        #output=getArg(pargs, 2, "what we want to save the file as")
-        isFile = True
-        response = clnt.projectGetRequest(project, item,isFile)
-        if response.content_type=="text/json":
-            ProcessedResponse(response).pprint()
-        else:
-            filecontents = response.getRawData() #this is an mmap
-            if output is not None:
-                file = open(output,"wb") 
+                name = host
+                if len(pargs) == 2:
+                    port = Conf.getDefaultClientSecurePort()
+                else:
+                    port = getArg(args, 2, "port")
+            server_cmd.addServer(host, name, port)
+            sys.exit(0)
+
+        elif cmd == "use-server":
+            name = getArg(args, 1, "servername")
+            server_cmd.useServer(name)
+            sys.exit(0)
+
+        elif cmd == "list-server":
+            server_cmd.listServer()
+            sys.exit(0)
+
+        elif cmd == "help":
+            print_usage()
+            sys.exit(0)
+
+        # handle remote commands
+        if cmd == "login":
+            if "-stdin" in args:
+                user = getArg(args, 2, "username")
+                password = raw_input()
             else:
-                file = sys.stdout
-            file.write(filecontents.read(len(filecontents)))
+                user = getArg(args, 1, "username")
+                password = getpass()
+            #password = getArg(args, 2, "password")
+            ProcessedResponse(server_cmd.login(user, password)).pprint()
+        elif cmd == "add-user":
+            user = getArg(args, 1, "username")
+            password = getpass("Enter password:")
+            password_repeat = getpass("And again:")
+            if password != password_repeat:
+                _printErrorAndExit("Passwords don't match")
+            ProcessedResponse(server_cmd.addUser(user, password)).pprint()
+        elif cmd == "delete-user":
+            user = getArg(args, 1, "username")
+            ProcessedResponse(server_cmd.deleteUser(user)).pprint()
+        elif cmd == "promote-user":
+            user = getArg(args, 1, "username")
+            ProcessedResponse(server_cmd.promoteUser(user)).pprint()
+        elif cmd == "demote-user":
+            user = getArg(args, 1, "username")
+            ProcessedResponse(server_cmd.demoteUser(user)).printf()
+        elif cmd == "grant-access":
+            user = getArg(args, 1, "username")
+            ProcessedResponse(server_cmd.grantAccess(user)).printf()
+        elif cmd == "users":
+            renderMethod = CmdLine.listUsers
+            resp = server_cmd.listUsers()
+            ProcessedResponse(resp).pprint(renderMethod)
+        elif cmd == "version":
+            cmd_line_utils.printLogo()
+            cmd_line_utils.printAuthors()
+            print "Client version:  %s" % __version__
+            print "\nConnecting to server for version information:"
+            ProcessedResponse(server_cmd.version).pprint(CmdLine.serverInfo)
+        elif cmd == "queue" or cmd == "q":
+            resp = server_cmd.queue()
+            renderMethod = CmdLine.listQueue
+            ProcessedResponse(resp).pprint(renderMethod)
+        elif cmd == "running" or cmd == "r":
+            resp = server_cmd.running()
+            renderMethod = CmdLine.listRunning
+            ProcessedResponse(resp).pprint(renderMethod)
+        elif cmd == "heartbeats" or cmd == "h":
+            resp = server_cmd.heartbeats()
+            renderMethod = CmdLine.listHeartbeats
+            ProcessedResponse(resp).pprint(renderMethod)
+        elif cmd == "command-failed":
+            cmd_id = getArg(args, 1, "command ID")
+            #server=None
+            ProcessedResponse(server_cmd.getFailed(cmd_id)).pprint()
+        # dataflow application specific messages
+        elif cmd == "start":
+            name = getArg(args, 1, "project name")
+            ProcessedResponse(server_cmd.startProject(name)).pprint()
+        elif cmd == "remove" or cmd == "rm":
+            delDir = True
+            name = None
+            for arg in args:
+                if arg == cmd:
+                    continue
+                if arg == "-k":
+                    delDir = False
+                else:
+                    name = arg
+            if name is None:
+                _printErrorAndExit("Missing project name for project-delete")
+            ProcessedResponse(server_cmd.deleteProject(name, delDir)).pprint()
+        elif cmd == "projects" or cmd == "p":
+            renderMethod = CmdLine.listProjects
+            ProcessedResponse(server_cmd.listProjects()).pprint(renderMethod)
+        elif cmd == "set-default" or cmd == "cd":
+            project = getArg(args, 1, "project name")
+            ProcessedResponse(server_cmd.setProject(project)).pprint()
+        elif cmd == "get-default" or cmd == "pwd":
+            ProcessedResponse(server_cmd.getCurrentProject()).pprint()
+        elif cmd == "list" or cmd == "ls":
+            project, pargs = getProjectArgs(args)
+            if len(pargs) > 1:
+                item = getArg(pargs, 1, "project item to list")
+            else:
+                item = ""
+            resp = server_cmd.listItem(project, item)
+            renderMethod = CmdLine.listActiveItems
+            ProcessedResponse(resp).pprint(renderMethod)
+        elif cmd == "info":
+            project, pargs = getProjectArgs(args)
+            item = getArg(pargs, 1, "item to get info for")
+            resp = server_cmd.itemInfo(project, item)
+            renderMethod = CmdLine.writeInfo
+            ProcessedResponse(resp).pprint(renderMethod)
+        elif cmd == "debug":
+            project, pargs = getProjectArgs(args)
+            item = getArg(pargs, 1, "item to get debug info for")
+            resp = server_cmd.getDebugInfo(project, item)
+            ProcessedResponse(resp).pprint(None)
+        elif cmd == "graph":
+            project, pargs = getProjectArgs(args)
+            if len(pargs) > 1:
+                item = getArg(pargs, 1, "project item to make graph of")
+            else:
+                item = ""
+            resp = server_cmd.getGraph(project, item)
+            renderMethod = CmdLine.makeDotGraph
+            ProcessedResponse(resp).pprint(renderMethod)
+        elif cmd == "log":
+            project, pargs = getProjectArgs(args)
+            item = getArg(pargs, 1, "instance to get log for")
+            isFile = True
+            response = server_cmd.getLogData(project, item)
+            if response.content_type == "text/json":
+                ProcessedResponse(response).pprint()
+            else:
+                filecontents = response.getRawData() #this is an mmap
+                sys.stdout.write(filecontents.read(len(filecontents)))
+        elif cmd == "activate":
+            project, pargs = getProjectArgs(args)
+            if len(pargs) > 1:
+                item = getArg(pargs, 1, "project item to activate")
+            else:
+                item = ""
+            ProcessedResponse(server_cmd.activateNetwork(project, item)).pprint()
+        elif cmd == "deactivate" or cmd == "hold":
+            project, pargs = getProjectArgs(args)
+            if len(pargs) > 1:
+                item = getArg(pargs, 1, "project item to deactivate")
+            else:
+                item = ""
+            ProcessedResponse(server_cmd.deactivateNetwork(project,
+                                                           item)).pprint()
+        elif cmd == "clear-error":
+            project, pargs = getProjectArgs(args)
+            if len(pargs) > 1:
+                item = getArg(pargs, 1, "project item to clear")
+            else:
+                item = ""
+            ProcessedResponse(server_cmd.rerunNetwork(project,
+                                                      item, True)).pprint()
+        elif cmd == "force-rerun":
+            project, pargs = getProjectArgs(args)
+            item = getArg(pargs, 1, "project item to re-run")
+            ProcessedResponse(server_cmd.rerunNetwork(project,
+                                                      item, False)).pprint()
+        elif cmd == "upload":
+            project, pargs = getProjectArgs(args)
+            filename = getArg(pargs, 1, "project XML file")
+            ProcessedResponse(server_cmd.uploadProject(project,
+                                                       filename)).pprint()
+        elif cmd == "get":
+            project, pargs = getProjectArgs(args)
+            item = getArg(pargs, 1, "name of input/output item to get")
+            resp = server_cmd.getItem(project, item, False)
+            renderMethod = CmdLine.getItem
+            ProcessedResponse(resp).pprint(renderMethod)
+        elif cmd == "get-file" or cmd == "getf":
+            project, pargs = getProjectArgs(args)
+            if len(pargs) < 2:
+                print "Missing argument: item name"
+                sys.exit(1)
+            if pargs[1] == "-f":
+                if len(pargs) < 3:
+                    print "Missing argument: file name"
+                if len(pargs) < 4:
+                    print "Missing argument: item name"
+                output = pargs[2]
+                item = pargs[3]
+            else:
+                output = None
+                item = pargs[1]
+            response = server_cmd.getItem(project, item, True)
+            if response.content_type == "text/json":
+                ProcessedResponse(response).pprint()
+            else:
+                filecontents = response.getRawData() #this is an mmap
             if output is not None:
-                file.close()
-                print "item %s saved in %s"%(item,output)
-    elif cmd == "set":
-        project, pargs = getProjectArgs(args)
-        item=getArg(pargs, 1, "name of input item to set")
-        value=getArg(pargs, 2, "value of input item to set")
-        ProcessedResponse(clnt.projectSetRequest(project, item, value,
-                                                 None)).pprint()
-    elif cmd == "set-file" or cmd == "setf":
-        project, pargs = getProjectArgs(args)
-        item=getArg(pargs, 1, "name of input item to set")
-        filename=getArg(pargs, 2, "input file to set")
-        ProcessedResponse(clnt.projectSetRequest(project, item, None,
-                                                 filename)).pprint()
-    elif cmd == "transact":
-        project, pargs = getProjectArgs(args)
-        ProcessedResponse(clnt.projectTransactRequest(project)).pprint()
-    elif cmd == "commit":
-        project, pargs = getProjectArgs(args)
-        ProcessedResponse(clnt.projectCommitRequest(project)).pprint()
-    elif cmd == "rollback":
-        project, pargs = getProjectArgs(args)
-        ProcessedResponse(clnt.projectRollbackRequest(project)).pprint()
-    elif cmd == "list-modules":
-        resp = clnt.listRequest("modules")
-        renderMethod = CmdLine.listModules
-        ProcessedResponse(resp).pprint(renderMethod)
-    elif cmd == "import":
-        project, pargs = getProjectArgs(args)
-        module=getArg(pargs, 1, "name of module to import")
-        ProcessedResponse(clnt.projectImportRequest(project, 
-                                                    module)).pprint()        
-    elif cmd == "instance":
-        project, pargs = getProjectArgs(args)
-        fn=getArg(pargs, 1, "function name of new instance")
-        name=getArg(pargs, 2, "name of new instance")
-        ProcessedResponse(clnt.projectAddInstanceRequest(project, fn, 
-                                                         name)).pprint()
-    elif cmd == "connect":
-        project, pargs = getProjectArgs(args)
-        src=getArg(pargs, 1, "connection source")
-        dst=getArg(pargs, 2, "connection destination")
-        ProcessedResponse(clnt.projectConnectRequest(project, 
-                                                     src, dst)).pprint()
-    elif cmd == "trust":
-        if ("-all" in args):
-            ProcessedResponse(clnt.grantAllNodeConnections()).\
-            pprint(CmdLine.grantNodeConnectRequests)
+                outfile = open(output, "wb")
+            else:
+                outfile = sys.stdout
+            outfile.write(filecontents.read(len(filecontents)))
+            if output is not None:
+                outfile.close()
+                print "item %s saved in %s" % (item, output)
+        elif cmd == "set":
+            project, pargs = getProjectArgs(args)
+            item = getArg(pargs, 1, "name of input item to set")
+            value = getArg(pargs, 2, "value of input item to set")
+            ProcessedResponse(server_cmd.setItem(project, item, value)).pprint()
+        elif cmd == "set-file" or cmd == "setf":
+            project, pargs = getProjectArgs(args)
+            item = getArg(pargs, 1, "name of input item to set")
+            filename = getArg(pargs, 2, "input file to set")
+            ProcessedResponse(server_cmd.setInput(project, item,
+                                                  filename)).pprint()
+        elif cmd == "transact":
+            project, pargs = getProjectArgs(args)
+            ProcessedResponse(server_cmd.startTransaction(project)).pprint()
+        elif cmd == "commit":
+            project, pargs = getProjectArgs(args)
+            ProcessedResponse(server_cmd.commitTransaction(project)).pprint()
+        elif cmd == "rollback":
+            project, pargs = getProjectArgs(args)
+            ProcessedResponse(server_cmd.rollback(project)).pprint()
+        elif cmd == "list-modules":
+            renderMethod = CmdLine.listModules
+            ProcessedResponse(server_cmd.listModules()).pprint(renderMethod)
+        elif cmd == "import":
+            project, pargs = getProjectArgs(args)
+            module = getArg(pargs, 1, "name of module to import")
+            ProcessedResponse(server_cmd.importModule(module, project)).pprint()
+        elif cmd == "instance":
+            project, pargs = getProjectArgs(args)
+            fn = getArg(pargs, 1, "function name of new instance")
+            name = getArg(pargs, 2, "name of new instance")
+            ProcessedResponse(server_cmd.createInstance(project, fn,
+                                                        name)).pprint()
+        elif cmd == "connect":
+            project, pargs = getProjectArgs(args)
+            src = getArg(pargs, 1, "connection source")
+            dst = getArg(pargs, 2, "connection destination")
+            ProcessedResponse(server_cmd.connectItems(project, src,
+                                                      dst)).pprint()
+        elif cmd == "trust":
+            renderMethod = CmdLine.grantNodeConnectRequests
+            if "-all" in args:
+                ProcessedResponse(server_cmd.trustServer()).pprint(renderMethod)
+            else:
+                serverId = getArg(args, 1, "server-id")
+                resp = ProcessedResponse(server_cmd.trustServer)
+                resp.pprint(renderMethod)
+        elif cmd == "connect-server":
+            host = getArg(args, 1, "hostname")
+            client_secure_port = None
+            server_secure_port = None
+            if len(args) > 2:
+                client_secure_port = str(getArg(args, 2, 'client_secure_port'))
+            else:
+                client_secure_port = Conf.getDefaultClientSecurePort()
+            rawresp = server_cmd.AddServerNode(host, client_secure_port)
+            ProcessedResponse(rawresp).pprint(CmdLine.addNodeRequest)
+        elif cmd == 'connected-servers' or cmd == 'cs':
+            resp = ProcessedResponse(server_cmd.listServers())
+            resp.pprint(CmdLine.listServers)
+        elif cmd == "revoke":
+            serverId = getArg(args, 1, "server Id")
+            ProcessedResponse(server_cmd.revokeServer(serverId)).pprint()
+        elif cmd == "change-node-priority" or cmd == "set-pri":
+            if len(args) > 2:
+                priority = getArg(args, 1, "priority")
+                host = getArg(args, 2, "host")
+            if len(args) > 3:
+                port = getArg(args, 3, "port")
+            else:
+                port = 13807
+            resp = ProcessedResponse(server_cmd.setServerPriority(host, priority,
+                                                                  port))
+            resp.pprint(CmdLine.listNodes)
+        elif cmd == "network":
+            resp = ProcessedResponse(server_cmd.getNetworkTopology())
+            resp.pprint(CmdLine.networkTopology)
+        elif cmd == "network-graph":  #calls graphviz
+            filename = getArg(args, 1, 'filename')
+            outfile = open(filename, "w")
+            resp = ProcessedResponse(server_cmd.getNetworkTopology())
+            outfile.write(CmdLine.networkTopology(resp[0]))
+            outfile.close()
+            subprocess.call(["dot", "-Tsvg", filename, '-o', filename+".svg"])
+        elif cmd == "status" or cmd == "s":
+            project = None
+            if len(args) > 1:
+                project = getArg(args, 1, "project")
+            resp = ProcessedResponse(server_cmd.getStatus(project))
+            resp.pprint(CmdLine.status)
+        elif cmd == "readconf":
+            ProcessedResponse(server_cmd.reloadConf()).pprint()
+        elif cmd == "stop-server":
+            ProcessedResponse(server_cmd.stopServer()).pprint()
+        elif cmd == "server-info":
+            ProcessedResponse(server_cmd.serverInfo()).pprint(CmdLine.serverInfo)
+        elif cmd == "ping":
+            # Default is to ping the connected server
+            serverId = None
+            if len(args) > 1:
+                serverId = getArg(args, 1, "serverId")
+            ProcessedResponse(server_cmd.pingServer(serverId)).pprint()
+        elif cmd == "save-state":
+            ProcessedResponse(server_cmd.saveState()).pprint()
+        # save and load project commands
+        elif cmd == "save":
+            project = getArg(args, 1, "Project name")
+            savePath = "%s.tar.gz"%project
+            if len(args) > 2:
+                savePath = getArg(args, 2, "Destination file")
+            ProcessedResponse(server_cmd.saveProject(project, savePath)).pprint()
+        elif cmd == "load":
+            # load and restore a project file on the server side
+            projectFile = getArg(args, 1, "Path to project file")
+            projectName = getArg(args, 2, "Name of project")
+            ProcessedResponse(server_cmd.loadProject(projectName,
+                                                     projectFile)).pprint()
         else:
-            serverId = getArg(args,1, "server-id")
-            ProcessedResponse(clnt.grantNodeConnection(serverId)).pprint(CmdLine.grantNodeConnectRequests)
-
-    elif cmd == "connect-server":
-        host = getArg(args,1,"hostname")
-        client_secure_port = None
-        server_secure_port = None
-        if len(args)>2:
-            client_secure_port = str(getArg(args,2,'client_secure_port'))
-        else:
-            client_secure_port = Conf.getDefaultClientSecurePort()
-                  
-        ProcessedResponse(clnt.addNode(host, client_secure_port)).\
-        pprint(CmdLine.addNodeRequest)
-
-    elif cmd == 'connected-servers' or cmd=='cs':
-        ProcessedResponse(clnt.listServers()).pprint(CmdLine.listServers)
-    
-    elif cmd == "revoke":
-        print "WARNING: The revoke command has security issues and a revoked"
-        print "server is not to be considered revoked from a security perspective"
-        print "---"
-        serverId = getArg(args,1,"server Id")
-        ProcessedResponse(clnt.revokeNode(serverId)).pprint()
-
-    elif cmd == "change-node-priority" or cmd == "set-pri":
-        if len(args) >= 3:
-            priority = getArg(args,1,"priority")
-            host = getArg(args,2,"host")
-            port = 13807
-        
-        if len(args)>3:
-            port = getArg(3,"port")
-        ProcessedResponse(clnt.changeNodePriority(host,priority,port)).\
-                  pprint(CmdLine.listNodes)
-            
-    elif cmd == "network":
-        ProcessedResponse(clnt.networkTopology()).\
-                  pprint(CmdLine.networkTopology)
-        
-    elif cmd == "network-graph":  #calls graphviz
-        
-        filename = getArg(args,1,'filename')
-        file = open(filename,"w")
-        processedResponse = ProcessedResponse(clnt.networkTopology())
-        file.write(CmdLine.networkTopology(processedResponse.resp[0]))
-        file.close() 
-        subprocess.call(["dot","-Tsvg",filename,'-o',filename+".svg"])
-
-    elif cmd == "status" or cmd == "s":
-        project = None
-        if len(args) > 1:
-            project = getArg(args,1,"project")
-        ProcessedResponse(clnt.statusRequest(project)).pprint(CmdLine.status)
-
-    elif cmd == "readconf":
-        ProcessedResponse(clnt.readConfRequest()).pprint()
-    
-    elif cmd == "stop-server":
-        ProcessedResponse(clnt.stopRequest()).pprint()
-
-    elif cmd == "server-info":
-        ProcessedResponse(clnt.serverInfo()).pprint(CmdLine.serverInfo)
-
-    elif cmd == "ping":
-        serverId = None  #will ping the server the client is connected to
-
-        if(len(args)>1):
-            serverId = getArg(args,1,"serverId")
-
-        ProcessedResponse(clnt.pingServer(serverId)).pprint()
-
-
-    elif cmd == "save-state":
-        ProcessedResponse(clnt.saveStateRequest()).pprint()
-
-
-    # save and load project commands
-    elif cmd =="save":
-
-        project= getArg(args,1,"Project name")
-
-        savePath = "%s.tar.gz"%project
-        if(len(args)>2):
-            savePath=getArg(args, 2, "Destination file")
-
-        response = clnt.projectSaveRequest(project)
-
-        if response.content_type=="text/json":
-            ProcessedResponse(response).pprint()
-
-        else:
-            filecontents = response.getRawData() #this is an mmap
-            #try catch here!! test if file can be written in destination
-            try:
-                file=open(savePath,"wb")
-                file.write(filecontents.read(len(filecontents)))
-                file.close()
-            except IOError as e:
-                _printErrorAndExit("Could not save project to %s\nError %s"%(
-                    savePath, e.strerror))
-
-
-            print "Saved project to %s"%savePath
-    elif cmd =="load":
-        #provided a project file it will restore it on the server side
-
-        #path to the file
-        projectFile = getArg(args, 1, "Path to project file")  
-        projectName = getArg(args, 2, "Name of project")  
-
-        ProcessedResponse(clnt.projectRestoreRequest(projectFile,
-                                                     projectName)).pprint()
-    else: 
-        _printErrorAndExit("ERROR: unknown command '%s'"%cmd)
-
-except ResponseError as e:
-    _printErrorAndExit("Request failed:\n%s\n"%str(e))
-except (ClientError, cpc.util.CpcError) as e:
-    _printErrorAndExit("ERROR: %s"%str(e))
+            _printErrorAndExit("ERROR: unknown command '%s'"%cmd)
+    except ResponseError as e:
+        _printErrorAndExit("Request failed:\n%s\n" % str(e))
+    except (ClientError, cpc.util.CpcError) as e:
+        _printErrorAndExit("ERROR: %s" % str(e))
 
 
 
