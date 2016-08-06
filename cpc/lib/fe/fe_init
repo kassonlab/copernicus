@@ -97,7 +97,7 @@ def fe_init(inp, out):
         #valarray.append(RecordValue( { 'name' : StringValue('sc-alpha'),
                                        #'value' : StringValue('0.5') } ))
         valarray.append(RecordValue( { 'name' : StringValue('sc-power'),
-                                       'value' : StringValue('1.0') } ))
+                                       'value' : StringValue('1') } ))
         valarray.append(RecordValue( { 'name' : StringValue('sc-sigma'),
                                        'value' : StringValue('0.3') } ))
         valarray.append(RecordValue( { 'name' : StringValue('couple-lambda0'),
