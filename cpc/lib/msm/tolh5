@@ -103,7 +103,7 @@ def removeSolAndPBC(inFile, outFile, tprFile, grpname, ndxFile, persDir):
     sys.stderr.write("Removing solvent and pbc:\n")
     args = cmdnames.trjconv.split()
     args += ["-f", "%s" % inFile, "-s", tprFile, "-o",
-             "%s "% outFile, "-pbc", "mol"]
+             "%s"% outFile, "-pbc", "mol"]
     if ndxFile is not None:
         args.extend( [ '-n', ndxFile ] )
     proc = subprocess.Popen(args, stdin=subprocess.PIPE,
